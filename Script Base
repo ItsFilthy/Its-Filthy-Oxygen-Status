@@ -1,0 +1,193 @@
+/* --- Color Change --- */
+readonly Color COLOR_ALERT = new Color(255, 0, 0);    
+readonly Color COLOR_WARNING = new Color(255, 120, 0); 
+/* --- Color Change --- */
+
+List<IMyAirVent> vents = new List<IMyAirVent>();
+List<IMyGasTank> tanks = new List<IMyGasTank>();
+List<IMyTextSurface> doorSurfaces = new List<IMyTextSurface>();
+List<IMyTextSurface> statusSurfaces = new List<IMyTextSurface>();
+List<IMyLightingBlock> warningLights = new List<IMyLightingBlock>();
+List<IMyBlockGroup> doorGroups = new List<IMyBlockGroup>();
+
+System.Text.StringBuilder doorSb = new System.Text.StringBuilder();
+System.Text.StringBuilder statusSb = new System.Text.StringBuilder();
+
+List<IMyAirVent> _tempVents = new List<IMyAirVent>();
+List<IMyGasTank> _tempTanks = new List<IMyGasTank>();
+List<IMyLightingBlock> _tempLights = new List<IMyLightingBlock>();
+List<IMyBlockGroup> _tempGroups = new List<IMyBlockGroup>();
+List<IMyTerminalBlock> _tempBlocks = new List<IMyTerminalBlock>();
+List<IMyDoor> _tempDoors = new List<IMyDoor>();
+List<string> activeAlerts = new List<string>();
+
+HashSet<string> breachRooms = new HashSet<string>();
+HashSet<string> depressureRooms = new HashSet<string>();
+
+bool _isInitialized = false;
+int _ticks = 0;
+
+public Program()
+{
+    Runtime.UpdateFrequency = UpdateFrequency.Update100;
+}
+
+public void Main(string argument, UpdateType updateSource)
+{
+    _ticks++;
+    if (!_isInitialized || argument.ToLower() == "setup" || _ticks % 300 == 0) Initialize();
+    
+    IMyCubeGrid mainGrid = Me.CubeGrid;
+    bool isBreach = false;
+    bool isDepressurizing = false;
+    bool anyDoorOpen = false;
+    bool anyDoorMoving = false;
+    double totalO2 = 0;
+    double maxO2 = 0;
+
+    breachRooms.Clear();
+    depressureRooms.Clear();
+    activeAlerts.Clear();
+    doorSb.Clear();
+    statusSb.Clear();
+
+    for (int i = 0; i < tanks.Count; i++) {
+        if (tanks[i] == null || !tanks[i].IsWorking) continue;
+        if (tanks[i].BlockDefinition.SubtypeId.Contains("Hydro")) continue;
+        maxO2 += tanks[i].Capacity;
+        totalO2 += (tanks[i].Capacity * tanks[i].FilledRatio);
+    }
+
+    double o2Percent = (maxO2 > 0) ? (totalO2 / maxO2) * 100 : 0;
+
+    for (int i = 0; i < vents.Count; i++) {
+        var v = vents[i];
+        if (v == null || !v.IsWorking) continue;
+        float ventOxy = v.GetOxygenLevel();
+        if (ventOxy <= 0.10f) {
+            if (v.Depressurize) { isDepressurizing = true; depressureRooms.Add(v.CustomName); }
+            else { isBreach = true; breachRooms.Add(v.CustomName); }
+        }
+    }
+
+    doorSb.AppendLine("DOORS\n---");
+    for (int i = 0; i < doorGroups.Count; i++) {
+        var group = doorGroups[i];
+        _tempDoors.Clear();
+        group.GetBlocksOfType(_tempDoors);
+        string stateText = "CLOSED";
+        bool isMoving = false;
+        bool isOpen = false;
+
+        for (int j = 0; j < _tempDoors.Count; j++) {
+            var d = _tempDoors[j];
+            if (d.CubeGrid != mainGrid) continue; 
+            var status = d.Status;
+            if (status == DoorStatus.Opening || status == DoorStatus.Closing) { isMoving = true; anyDoorMoving = true; }
+            else if (status == DoorStatus.Open) { isOpen = true; anyDoorOpen = true; }
+        }
+
+        if (isMoving) stateText = "MOVING";
+        else if (isOpen) stateText = "OPEN";
+
+        string cleanLabel = group.Name.Replace("!status", "").Trim().ToUpper();
+        doorSb.Append(cleanLabel).Append(": ").AppendLine(stateText);
+        if (isMoving || isOpen) activeAlerts.Add(cleanLabel);
+    }
+
+    statusSb.AppendLine("RESERVES");
+    statusSb.Append("O2: ").Append(o2Percent.ToString("0.0")).AppendLine("%");
+    statusSb.AppendLine("---");
+    
+    if (isBreach) {
+        statusSb.AppendLine("BREACH!!");
+        foreach(var room in breachRooms) statusSb.AppendLine(room);
+    } 
+    else if (isDepressurizing) {
+        statusSb.AppendLine("VACUUM:");
+        foreach(var room in depressureRooms) statusSb.AppendLine(room);
+    }
+    else if (anyDoorOpen || anyDoorMoving) {
+        statusSb.AppendLine("DOOR ALERT");
+        for (int i = 0; i < activeAlerts.Count; i++) statusSb.AppendLine(activeAlerts[i]);
+    }
+    else { statusSb.AppendLine("SEALED"); }
+
+    UpdateLCDs(statusSb, doorSb, isBreach, isDepressurizing, anyDoorOpen, anyDoorMoving);
+
+    Color currentTargetColor = (isBreach || anyDoorOpen || anyDoorMoving) ? COLOR_ALERT : COLOR_WARNING;
+    bool shouldBeOn = (isBreach || anyDoorOpen || anyDoorMoving || isDepressurizing);
+
+    for (int i = 0; i < warningLights.Count; i++) {
+        var wLight = warningLights[i];
+        if (wLight.Enabled != shouldBeOn) wLight.Enabled = shouldBeOn;
+        if (shouldBeOn && wLight.Color != currentTargetColor) wLight.Color = currentTargetColor;
+    }
+}
+
+void Initialize()
+{
+    doorSurfaces.Clear(); statusSurfaces.Clear(); vents.Clear(); tanks.Clear();
+    warningLights.Clear(); doorGroups.Clear();
+    IMyCubeGrid myGrid = Me.CubeGrid;
+
+    _tempVents.Clear();
+    GridTerminalSystem.GetBlocksOfType(_tempVents);
+    for (int i = 0; i < _tempVents.Count; i++) if (_tempVents[i].CubeGrid == myGrid) vents.Add(_tempVents[i]);
+
+    _tempTanks.Clear();
+    GridTerminalSystem.GetBlocksOfType(_tempTanks);
+    for (int i = 0; i < _tempTanks.Count; i++) if (_tempTanks[i].CubeGrid == myGrid) tanks.Add(_tempTanks[i]);
+
+    IMyBlockGroup lightGroup = GridTerminalSystem.GetBlockGroupWithName("Status Lights");
+    if (lightGroup != null) {
+        _tempLights.Clear();
+        lightGroup.GetBlocksOfType(_tempLights);
+        for (int i = 0; i < _tempLights.Count; i++) if(_tempLights[i].CubeGrid == myGrid) warningLights.Add(_tempLights[i]);
+    }
+
+    _tempGroups.Clear();
+    GridTerminalSystem.GetBlockGroups(_tempGroups);
+    for (int i = 0; i < _tempGroups.Count; i++) {
+        if (_tempGroups[i].Name.StartsWith("!status", StringComparison.OrdinalIgnoreCase)) doorGroups.Add(_tempGroups[i]);
+    }
+
+    IMyTerminalBlock statusBlock = GridTerminalSystem.GetBlockWithName("!status LCD");
+    if (statusBlock == null) statusBlock = GridTerminalSystem.GetBlockWithName("!Status LCD");
+    if (statusBlock != null && statusBlock.CubeGrid == myGrid) AddTo(statusBlock, statusSurfaces, 1.0f);
+
+    IMyBlockGroup screenGroup = GridTerminalSystem.GetBlockGroupWithName("Status LCD Group");
+    if (screenGroup != null) {
+        _tempBlocks.Clear();
+        screenGroup.GetBlocks(_tempBlocks);
+        for (int i = 0; i < _tempBlocks.Count; i++) if(_tempBlocks[i].CubeGrid == myGrid) AddTo(_tempBlocks[i], doorSurfaces, 1.0f);
+    }
+    _isInitialized = true;
+}
+
+void UpdateLCDs(System.Text.StringBuilder statusText, System.Text.StringBuilder doorText, bool breach, bool depress, bool door, bool moving) {
+    Color statusBg = (breach || door || moving) ? new Color(150, 0, 0) : (depress ? new Color(120, 50, 0) : Color.Black);
+    Color doorBg = moving ? new Color(80, 40, 0) : (door ? new Color(60, 20, 0) : Color.Black);
+
+    for (int i = 0; i < statusSurfaces.Count; i++) {
+        statusSurfaces[i].BackgroundColor = statusBg;
+        statusSurfaces[i].WriteText(statusText);
+    }
+    for (int i = 0; i < doorSurfaces.Count; i++) {
+        doorSurfaces[i].BackgroundColor = doorBg;
+        doorSurfaces[i].WriteText(doorText);
+    }
+}
+
+void AddTo(IMyTerminalBlock block, List<IMyTextSurface> list, float fontSize) {
+    var provider = block as IMyTextSurfaceProvider;
+    if (provider == null) return;
+    for (int i = 0; i < provider.SurfaceCount; i++) {
+        var s = provider.GetSurface(i);
+        s.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+        s.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
+        s.FontSize = fontSize;
+        s.Font = "Debug";
+        list.Add(s);
+    }
+}
